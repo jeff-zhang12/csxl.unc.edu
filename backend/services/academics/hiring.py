@@ -5,7 +5,7 @@ Service for hiring.
 from itertools import groupby
 from operator import attrgetter
 from fastapi import Depends
-from sqlalchemy import String, func, or_, select, update
+from sqlalchemy import String, func, or_, select, update, and_
 from sqlalchemy.orm import Session, joinedload, with_polymorphic, selectinload
 from datetime import datetime
 
@@ -1247,5 +1247,3 @@ class HiringService:
 
     def run_autohire(self, subject: User, term_id: str) -> None:
         return
-
-
