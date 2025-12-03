@@ -1243,3 +1243,9 @@ class HiringService:
                 "preferred_sections": ", ".join(preferred_sections_list),
                 "instructor_selections": instructor_selections_field,
             }
+
+
+    def run_autohire(self, subject: User, term_id: str) -> None:
+        return
+
+

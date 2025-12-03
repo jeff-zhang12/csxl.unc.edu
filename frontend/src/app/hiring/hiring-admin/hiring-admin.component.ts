@@ -215,4 +215,9 @@ export class HiringAdminComponent {
       this.hiringService.downloadApplicantsCsv(this.selectedTermId()!);
     }
   }
+  runAutohire() {
+    if (this.selectedTermId()) {
+      this.hiringService.runAutohire(this.selectedTermId()!);
+    }
+  }
 }

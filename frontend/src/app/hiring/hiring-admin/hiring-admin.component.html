@@ -20,9 +20,9 @@
           <mat-icon>tune</mat-icon>
           <span>Edit Hiring Levels</span>
         </button>
-        <button mat-menu-item>
+        <button mat-menu-item (click)="runAutohire()">
           <mat-icon>auto_awesome</mat-icon>
-          <span>Run Autodraft</span>
+          <span>Run Autohire</span>
         </button>
       </mat-menu>
       <button mat-flat-button routerLink="/hiring/summary">HR Onboarding</button>
