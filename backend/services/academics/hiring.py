@@ -5,7 +5,7 @@ Service for hiring.
 from itertools import groupby
 from operator import attrgetter
 from fastapi import Depends
-from sqlalchemy import String, func, or_, select, update, and_
+from sqlalchemy import String, func, or_, select, update
 from sqlalchemy.orm import Session, joinedload, with_polymorphic, selectinload
 from datetime import datetime
 
@@ -1246,4 +1246,102 @@ class HiringService:
 
 
     def run_autohire(self, subject: User, term_id: str) -> None:
-        return
+        """
+        Automatically creates hiring assignments based on a greedy matching algorithm.
+        """
+        self._permission.enforce(subject, "hiring.admin", "*")
+
+        admin_overview = self.get_hiring_admin_overview(subject, term_id)
+        
+        remaining_coverage = {
+            site.course_site_id: site.coverage 
+            for site in admin_overview.sites
+        }
+
+        valid_sections_subquery = select(SectionEntity.id).where(
+            SectionEntity.course_site_id == ApplicationReviewEntity.course_site_id
+        )
+
+        student_rank_subquery = (
+            select(func.min(section_application_table.c.preference))
+            .where(section_application_table.c.application_id == ApplicationReviewEntity.application_id)
+            .where(section_application_table.c.section_id.in_(valid_sections_subquery))
+            .scalar_subquery()
+        )
+
+        stmt = (
+            select(
+                ApplicationReviewEntity,
+                student_rank_subquery.label("student_rank")
+            )
+            .join(CourseSiteEntity, ApplicationReviewEntity.course_site_id == CourseSiteEntity.id)
+            .where(CourseSiteEntity.term_id == term_id)
+            .where(ApplicationReviewEntity.status == ApplicationReviewStatus.PREFERRED)
+            .options(
+                joinedload(ApplicationReviewEntity.level),
+                joinedload(ApplicationReviewEntity.application)
+            )
+        )
+        
+        results = self._session.execute(stmt).all()
+        
+        potential_matches = []
+        for review, student_rank in results:
+            s_rank = student_rank if student_rank is not None else 999
+            potential_matches.append({
+                'review': review,
+                'student_rank': s_rank,
+                'review_id': review.id
+            })
+
+        potential_matches.sort(key=lambda x: (x['student_rank'], x['review_id']))
+
+        assigned_student_ids = set()
+        
+        existing_assignments = self._session.scalars(
+            select(HiringAssignmentEntity)
+            .where(HiringAssignmentEntity.term_id == term_id)
+        ).all()
+        for ea in existing_assignments:
+            assigned_student_ids.add(ea.user_id)
+
+        new_assignments = []
+        
+        for match in potential_matches:
+            review = match['review']
+            student_id = review.application.user_id 
+            course_id = review.course_site_id
+            
+            if student_id in assigned_student_ids:
+                continue
+                
+            if not review.level: 
+                continue
+                
+            load_cost = review.level.load
+            
+            current_budget = remaining_coverage.get(course_id, 0.0)
+            
+            if current_budget >= (0):
+                new_assignment = HiringAssignmentEntity(
+                    term_id=term_id,
+                    course_site_id=course_id,
+                    user_id=student_id,
+                    hiring_level_id=review.level.id,
+                    application_review_id=review.id,
+                    status=HiringAssignmentStatus.DRAFT, 
+                    position_number="",
+                    epar="",
+                    i9=False,
+                    notes="",
+                    created=datetime.now(),
+                    modified=datetime.now()
+                )
+                new_assignments.append(new_assignment)
+                
+                remaining_coverage[course_id] -= load_cost
+                assigned_student_ids.add(student_id)
+
+        if new_assignments:
+            self._session.add_all(new_assignments)
+            self._session.commit()
