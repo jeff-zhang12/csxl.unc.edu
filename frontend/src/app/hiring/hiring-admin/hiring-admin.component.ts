@@ -215,4 +215,16 @@ export class HiringAdminComponent {
       this.hiringService.downloadApplicantsCsv(this.selectedTermId()!);
     }
   }
+
+  /** Automatically create draft hiring assignments for courses based on instructor preferences */
+  runAutohire() {
+    if (this.selectedTermId()) {
+      this.hiringService.runAutohire(this.selectedTermId()!).subscribe({
+        next: () => {
+          this.reloadData();
+        }
+      });
+    }
+  }
 }
+

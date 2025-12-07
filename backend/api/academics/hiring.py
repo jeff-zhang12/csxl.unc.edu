@@ -424,6 +424,16 @@ def get_applicants_for_term_csv(
     )
     return response
 
+@api.post("/admin/autohire/{term_id}", tags=["Hiring"])
+def run_autohire(
+    term_id: str,
+    subject: User = Depends(registered_user),
+    hiring_service: HiringService = Depends(),
+) -> None:
+    """
+    Run Autohire
+    """
+    return hiring_service.run_autohire(subject, term_id)
 
 @api.get(
     "/assignments/{assignment_id}/history",

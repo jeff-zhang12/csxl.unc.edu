@@ -193,4 +193,8 @@ export class HiringService {
   getCourseSiteEnrollment(courseSiteId: number): Observable<number> {
     return this.http.get<number>(`/api/hiring/${courseSiteId}/enrollment`);
   }
+
+  runAutohire(termId: string): Observable<void> {
+    return this.http.post<void>(`/api/hiring/admin/autohire/${termId}`, {});
+  }
 }
