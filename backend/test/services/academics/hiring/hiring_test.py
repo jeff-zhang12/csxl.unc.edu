@@ -23,11 +23,16 @@ from .....entities.academics.section_entity import SectionEntity
 from .....entities.academics.hiring.application_review_entity import (
     ApplicationReviewEntity,
 )
+from .....entities.academics.hiring.hiring_assignment_entity import HiringAssignmentEntity, HiringAssignmentStatus
+from .....entities.academics.hiring.hiring_level_entity import HiringLevelEntity
+from .....entities.office_hours import CourseSiteEntity
+from .....entities.section_application_table import section_application_table
 from .....models.academics.hiring.hiring_assignment_audit import (
     HiringAssignmentAuditOverview,
 )
+from .....models.academics.hiring.hiring_assignment import HiringAssignmentFlagFilter
 
-from sqlalchemy import select
+from sqlalchemy import select, delete, text
 from sqlalchemy.orm import Session
 
 
@@ -370,7 +375,7 @@ def test_get_hiring_summary_overview_flagged(hiring_svc: HiringService):
     term_id = term_data.current_term.id
     pagination_params = PaginationParams(page=0, page_size=10, order_by="", filter="")
     summary = hiring_svc.get_hiring_summary_overview(
-        user_data.root, term_id, "flagged", pagination_params
+        user_data.root, term_id, HiringAssignmentFlagFilter.FLAGGED, pagination_params
     )
     assert summary is not None
     assert len(summary.items) > 0
@@ -382,7 +387,7 @@ def test_get_hiring_summary_overview_not_flagged(hiring_svc: HiringService):
     term_id = term_data.current_term.id
     pagination_params = PaginationParams(page=0, page_size=10, order_by="", filter="")
     summary = hiring_svc.get_hiring_summary_overview(
-        user_data.root, term_id, "not_flagged", pagination_params
+        user_data.root, term_id, HiringAssignmentFlagFilter.NOT_FLAGGED, pagination_params
     )
     assert summary is not None
     assert len(summary.items) > 0
@@ -465,3 +470,187 @@ def test_get_audit_history_permissions(hiring_svc: HiringService):
         hiring_svc.get_audit_history(
             user_data.student, hiring_data.hiring_assignment.id
         )
+
+def test_run_autohire_respects_student_preference(hiring_svc: HiringService, session: Session):
+    """
+    Ensures that the student preferences are the tie breakers in automatically creating assignments
+    when multiple instructors prefer the same student.
+
+    Scenario: Student A ranks Course 1 (#1) and Course 2 (#2). Instructors prefer A for both.
+    Expected: Student A is assigned to Course 1 (their #1 choice).
+    """
+    from .....entities.application_entity import ApplicationEntity
+    
+    admin = user_data.root
+    term_id = term_data.current_term.id
+    student = user_data.student
+    
+    session.execute(text("SELECT setval('academics__hiring__assignment_id_seq', 100, true)"))
+    session.commit()
+
+    session.execute(
+        delete(HiringAssignmentEntity)
+        .where(HiringAssignmentEntity.user_id == student.id)
+    )
+    session.flush()
+
+    site_1 = session.get(CourseSiteEntity, office_hours_data.comp_301_site.id) 
+    site_2 = session.get(CourseSiteEntity, office_hours_data.comp_110_site.id)
+    
+    s1 = SectionEntity(
+        term_id=term_id, course_id="comp301", number="999", 
+        course_site_id=site_1.id, 
+        total_seats=100, enrolled=65, 
+        meeting_pattern="MWF"
+    )
+    s2 = SectionEntity(
+        term_id=term_id, course_id="comp110", number="999", 
+        course_site_id=site_2.id, 
+        total_seats=100, enrolled=65, 
+        meeting_pattern="MWF"
+    )
+    session.add_all([s1, s2])
+    session.commit()
+
+    fresh_app = ApplicationEntity(
+        user_id=student.id,
+        term_id=term_id,
+        type="new_uta", 
+        program_pursued="CS",
+        academic_hours=15,
+        gpa=4.0
+    )
+    session.add(fresh_app)
+    session.commit()
+
+    session.execute(section_application_table.insert().values(
+        application_id=fresh_app.id,
+        section_id=s1.id,
+        preference=0
+    ))
+
+    session.execute(section_application_table.insert().values(
+        application_id=fresh_app.id,
+        section_id=s2.id,
+        preference=1
+    ))
+    session.commit()
+
+    level = session.scalar(select(HiringLevelEntity).limit(1))
+    
+    rev1 = ApplicationReviewEntity(
+        application_id=fresh_app.id,
+        course_site_id=site_1.id,
+        status=ApplicationReviewStatus.PREFERRED,
+        preference=0,
+        level_id=level.id,
+        notes=""
+    )
+    rev2 = ApplicationReviewEntity(
+        application_id=fresh_app.id,
+        course_site_id=site_2.id,
+        status=ApplicationReviewStatus.PREFERRED,
+        preference=0,
+        level_id=level.id,
+        notes=""
+    )
+    session.add_all([rev1, rev2])
+    session.commit()
+
+    hiring_svc.run_autohire(admin, term_id)
+
+    assignments = session.scalars(
+        select(HiringAssignmentEntity)
+        .where(HiringAssignmentEntity.user_id == student.id)
+        .where(HiringAssignmentEntity.term_id == term_id)
+        .where(HiringAssignmentEntity.status == HiringAssignmentStatus.DRAFT)
+    ).all()
+
+    assert len(assignments) == 1
+    
+    assert assignments[0].course_site_id == site_1.id
+
+
+def test_run_autohire_stops_at_budget_limit(hiring_svc: HiringService, session: Session):
+    """
+    Test that budget limits are respected. If hiring a second student pushes coverage 
+    beyond the limit (e.g., > 1.0), the system stops hiring for that course.
+    """
+    admin = user_data.root
+    term_id = term_data.current_term.id
+    
+    session.execute(text("SELECT setval('academics__hiring__assignment_id_seq', 100, true)"))
+    session.commit()
+
+    site_id = office_hours_data.comp_110_site.id
+    site_entity = session.get(CourseSiteEntity, site_id)
+    
+    for section in site_entity.sections:
+        section.enrolled = 0
+    site_entity.sections[0].enrolled = 60
+    session.add(site_entity.sections[0])
+    
+    uta_level_id = hiring_data.uta_level.id 
+    
+    rev1 = ApplicationReviewEntity(
+        application_id=hiring_data.application_two.id,
+        course_site_id=site_entity.id,
+        status=ApplicationReviewStatus.PREFERRED,
+        preference=0,
+        level_id=uta_level_id, 
+        notes=""
+    )
+    rev2 = ApplicationReviewEntity(
+        application_id=hiring_data.application_three.id,
+        course_site_id=site_entity.id,
+        status=ApplicationReviewStatus.PREFERRED,
+        preference=1,
+        level_id=uta_level_id,
+        notes=""
+    )
+    session.add_all([rev1, rev2])
+    session.commit()
+
+    hiring_svc.run_autohire(admin, term_id)
+
+    assignments = session.scalars(
+        select(HiringAssignmentEntity)
+        .where(HiringAssignmentEntity.course_site_id == site_entity.id)
+        .where(HiringAssignmentEntity.status == HiringAssignmentStatus.DRAFT)
+    ).all()
+
+    assert len(assignments) == 1
+
+
+def test_run_autohire_skips_if_level_missing(hiring_svc: HiringService, session: Session):
+    """If a student is preferred by an instructor, but not given a preferred hiring level 
+    that student does not have a hiring assignment created"""
+    admin = user_data.root
+    term_id = term_data.current_term.id
+    site_id = office_hours_data.comp_110_site.id
+    site_entity = session.get(CourseSiteEntity, site_id)
+    
+    rev = ApplicationReviewEntity(
+        application_id=hiring_data.application_four.id,
+        course_site_id=site_entity.id,
+        status=ApplicationReviewStatus.PREFERRED,
+        preference=0,
+        level_id=None,
+        notes="Forgot Level"
+    )
+    session.add(rev)
+    session.commit()
+
+    hiring_svc.run_autohire(admin, term_id)
+
+    assignment = session.scalars(
+        select(HiringAssignmentEntity)
+        .where(HiringAssignmentEntity.user_id == user_data.uta.id)
+    ).first()
+    
+    assert assignment is None
+
+def test_run_autohire_permissions(hiring_svc: HiringService):
+    """Ensures that instructors can not run the autohire feature"""
+    with pytest.raises(UserPermissionException):
+        hiring_svc.run_autohire(user_data.instructor, term_data.current_term.id)
