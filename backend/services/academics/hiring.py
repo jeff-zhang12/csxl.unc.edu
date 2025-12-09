@@ -1381,22 +1381,8 @@ class HiringService:
             for site in admin_overview.sites
         }
 
-        valid_sections_subquery = select(SectionEntity.id).where(
-            SectionEntity.course_site_id == ApplicationReviewEntity.course_site_id
-        )
-
-        student_rank_subquery = (
-            select(func.min(section_application_table.c.preference))
-            .where(section_application_table.c.application_id == ApplicationReviewEntity.application_id)
-            .where(section_application_table.c.section_id.in_(valid_sections_subquery))
-            .scalar_subquery()
-        )
-
         stmt = (
-            select(
-                ApplicationReviewEntity,
-                student_rank_subquery.label("student_rank")
-            )
+            select(ApplicationReviewEntity)
             .join(CourseSiteEntity, ApplicationReviewEntity.course_site_id == CourseSiteEntity.id)
             .where(CourseSiteEntity.term_id == term_id)
             .where(ApplicationReviewEntity.status == ApplicationReviewStatus.PREFERRED)
@@ -1405,18 +1391,46 @@ class HiringService:
                 joinedload(ApplicationReviewEntity.application)
             )
         )
+        reviews = self._session.scalars(stmt).all()
         
-        results = self._session.execute(stmt).all()
+        
+        if not reviews:
+            return
+
+        app_ids = [r.application_id for r in reviews]
+        
+        rank_stmt = (
+            select(
+                section_application_table.c.application_id,
+                SectionEntity.course_site_id,
+                func.min(section_application_table.c.preference)
+            )
+            .join(SectionEntity, section_application_table.c.section_id == SectionEntity.id)
+            .where(section_application_table.c.application_id.in_(app_ids))
+            .group_by(
+                section_application_table.c.application_id,
+                SectionEntity.course_site_id
+            )
+        )
+        
+        rank_results = self._session.execute(rank_stmt).all()
+        
+        ranking_map = {
+            (row[0], row[1]): row[2] 
+            for row in rank_results
+        }
         
         potential_matches = []
-        for review, student_rank in results:
-            s_rank = student_rank if student_rank is not None else 999
+        for review in reviews:
+            s_rank = ranking_map.get((review.application_id, review.course_site_id), 999)
+            
             potential_matches.append({
                 'review': review,
                 'student_rank': s_rank,
                 'review_id': review.id
             })
 
+        
         potential_matches.sort(key=lambda x: (x['student_rank'], x['review_id']))
 
         assigned_student_ids = set()
